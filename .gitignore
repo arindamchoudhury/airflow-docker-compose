@@ -1,2 +1,48 @@
-logs
-*.log
+# Kiro IDE configuration and specs
+.kiro/
+
+# Airflow logs
+logs/
+
+# Environment variables (contains sensitive information)
+.env
+
+# Docker volumes and data
+postgres-db-volume/
+redis-data-volume/
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Airflow specific
+airflow.db
+airflow.cfg
+webserver_config.py
+standalone_admin_password.txt
+
+# Docker Compose override files
+docker-compose.override.yml
