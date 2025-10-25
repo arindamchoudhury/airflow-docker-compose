@@ -181,12 +181,6 @@ services:
           exit 1
         fi
         
-        # Step 3: Create admin user configuration
-        if ! create_admin_user; then
-          echo "ERROR: Admin user setup failed!"
-          exit 1
-        fi
-        
     environment:
       <<: *airflow-common-env
       _AIRFLOW_DB_MIGRATE: 'true'
