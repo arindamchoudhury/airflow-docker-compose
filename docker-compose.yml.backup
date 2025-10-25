@@ -1,0 +1,780 @@
+x-airflow-common:
+  &airflow-common
+  image: apache/airflow:3.1.0-python3.13
+  environment:
+    &airflow-common-env
+    # Core Airflow Configuration
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+    
+    # API Configuration for JWT Token Support
+    AIRFLOW__API__ACCESS_CONTROL_ALLOW_HEADERS: 'origin, content-type, accept, authorization, x-requested-with'
+    AIRFLOW__API__ACCESS_CONTROL_ALLOW_METHODS: 'POST, GET, OPTIONS, DELETE, PUT'
+    AIRFLOW__API__ACCESS_CONTROL_ALLOW_ORIGIN: '*'
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    
+    # Simple Auth Manager Configuration (Default for Airflow 3.1.0)
+    AIRFLOW__CORE__AUTH_MANAGER: 'airflow.api_fastapi.auth.managers.simple.simple_auth_manager.SimpleAuthManager'
+    AIRFLOW__SIMPLE_AUTH_MANAGER__USERS: 'admin:admin'
+    
+    # JWT Token Configuration for Simple Auth Manager (Airflow 3.1.0)
+    AIRFLOW__API__SECRET_KEY: ${AIRFLOW_SECRET_KEY:-your-secret-key-change-in-production}
+    AIRFLOW__SIMPLE_AUTH_MANAGER__JWT_SECRET_KEY: ${AIRFLOW_SECRET_KEY:-your-secret-key-change-in-production}
+    AIRFLOW__SIMPLE_AUTH_MANAGER__JWT_ALGORITHM: 'HS256'
+    AIRFLOW__SIMPLE_AUTH_MANAGER__JWT_EXPIRATION_DELTA: 86400  # 24 hours in seconds
+    AIRFLOW__SIMPLE_AUTH_MANAGER__JWT_REFRESH_DELTA: 604800   # 7 days in seconds
+    
+    # Logging Configuration
+    AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
+    
+    # Performance Configuration
+    AIRFLOW__CORE__PARALLELISM: 32
+    AIRFLOW__CORE__DAG_CONCURRENCY: 16
+    AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG: 16
+    
+    # Security Configuration
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'true'
+    AIRFLOW__WEBSERVER__RBAC: 'true'
+    
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+    - ./config:/opt/airflow/config
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+    airflow-init:
+      condition: service_completed_successfully
+
+networks:
+  airflow-network:
+    driver: bridge
+    name: airflow-network
+
+volumes:
+  postgres-db-volume:
+    name: airflow-postgres-db-volume
+  redis-data-volume:
+    name: airflow-redis-data-volume
+
+services:
+  # PostgreSQL Database Service
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    networks:
+      - airflow-network
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  # Redis Service (for CeleryExecutor support)
+  redis:
+    image: redis:8-alpine
+    command: redis-server --requirepass airflow --appendonly yes
+    networks:
+      - airflow-network
+    volumes:
+      - redis-data-volume:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "airflow", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: always
+    profiles:
+      - celery
+
+  # Airflow Database Initialization Service
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        # Function to check database connectivity
+        check_db() {
+          echo "Checking database connectivity..."
+          python -c "
+        import sys
+        import time
+        import psycopg2
+        from sqlalchemy import create_engine
+        
+        max_retries = 30
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                engine = create_engine('postgresql+psycopg2://airflow:airflow@postgres/airflow')
+                connection = engine.connect()
+                connection.close()
+                print('Database connection successful!')
+                sys.exit(0)
+            except Exception as e:
+                retry_count += 1
+                print(f'Database connection attempt {retry_count}/{max_retries} failed: {e}')
+                if retry_count >= max_retries:
+                    print('Max retries reached. Database connection failed.')
+                    sys.exit(1)
+                time.sleep(2)
+        "
+        }
+        
+        # Function to run database migration
+        migrate_db() {
+          echo "Starting database migration..."
+          max_retries=3
+          retry_count=0
+          
+          while [ $$retry_count -lt $$max_retries ]; do
+            echo "Migration attempt $$((retry_count + 1))/$$max_retries"
+            
+            if airflow db migrate; then
+              echo "Database migration completed successfully!"
+              return 0
+            else
+              retry_count=$$((retry_count + 1))
+              echo "Migration attempt $$retry_count failed."
+              
+              if [ $$retry_count -lt $$max_retries ]; then
+                echo "Retrying in 5 seconds..."
+                sleep 5
+              else
+                echo "All migration attempts failed. Exiting."
+                return 1
+              fi
+            fi
+          done
+        }
+        
+        # Function to create admin user for Simple Auth Manager
+        create_admin_user() {
+          echo "=== Starting Simple Auth Manager User Configuration ==="
+          
+          # Ensure config directory exists with proper error handling
+          echo "Creating configuration directory..."
+          if ! mkdir -p /opt/airflow/config; then
+            echo "ERROR: Failed to create configuration directory /opt/airflow/config"
+            echo "Check file system permissions and available disk space"
+            return 1
+          fi
+          echo "Configuration directory ready: /opt/airflow/config"
+          
+          # Read admin credentials from environment variables with fallback defaults
+          ADMIN_USERNAME="$${AIRFLOW_ADMIN_USERNAME:-admin}"
+          ADMIN_PASSWORD="$${AIRFLOW_ADMIN_PASSWORD:-admin123}"
+          
+          echo "Credential Configuration Analysis:"
+          echo "  - AIRFLOW_ADMIN_USERNAME environment variable: $${AIRFLOW_ADMIN_USERNAME:+'SET' || 'NOT SET (using default)'}"
+          echo "  - AIRFLOW_ADMIN_PASSWORD environment variable: $${AIRFLOW_ADMIN_PASSWORD:+'SET' || 'NOT SET (using default)'}"
+          echo "  - Resolved admin username: '$$ADMIN_USERNAME'"
+          echo "  - Password length: $${#ADMIN_PASSWORD} characters"
+          
+          # Validate that credentials are properly set (not empty after fallback)
+          if [ -z "$$ADMIN_USERNAME" ] || [ -z "$$ADMIN_PASSWORD" ]; then
+            echo "ERROR: Critical validation failure - Admin credentials not properly configured!"
+            echo "Details:"
+            echo "  - Username empty: $$([ -z "$$ADMIN_USERNAME" ] && echo 'YES' || echo 'NO')"
+            echo "  - Password empty: $$([ -z "$$ADMIN_PASSWORD" ] && echo 'YES' || echo 'NO')"
+            echo "Resolution:"
+            echo "  - Set AIRFLOW_ADMIN_USERNAME environment variable with desired username"
+            echo "  - Set AIRFLOW_ADMIN_PASSWORD environment variable with secure password"
+            echo "  - Ensure environment variables are properly passed to the airflow-init service"
+            return 1
+          fi
+          
+          # Additional validation to ensure credentials are not just whitespace
+          TRIMMED_USERNAME="$$(echo "$$ADMIN_USERNAME" | tr -d '[:space:]')"
+          TRIMMED_PASSWORD="$$(echo "$$ADMIN_PASSWORD" | tr -d '[:space:]')"
+          
+          if [ -z "$$TRIMMED_USERNAME" ] || [ -z "$$TRIMMED_PASSWORD" ]; then
+            echo "ERROR: Credential validation failed - Empty or whitespace-only values detected!"
+            echo "Details:"
+            echo "  - Username after trimming: '$$TRIMMED_USERNAME'"
+            echo "  - Password after trimming: $$([ -z "$$TRIMMED_PASSWORD" ] && echo 'EMPTY' || echo 'NON-EMPTY')"
+            echo "Resolution:"
+            echo "  - Ensure AIRFLOW_ADMIN_USERNAME contains valid characters (not just spaces)"
+            echo "  - Ensure AIRFLOW_ADMIN_PASSWORD contains valid characters (not just spaces)"
+            return 1
+          fi
+          
+          # Validate username format (basic alphanumeric check)
+          if ! echo "$$ADMIN_USERNAME" | grep -q '^[a-zA-Z0-9_-]\+$$'; then
+            echo "WARNING: Username contains special characters that may cause authentication issues"
+            echo "  - Current username: '$$ADMIN_USERNAME'"
+            echo "  - Recommended: Use only letters, numbers, underscores, and hyphens"
+          fi
+          
+          # Validate password strength (basic checks)
+          if [ $${#ADMIN_PASSWORD} -lt 6 ]; then
+            echo "WARNING: Password is shorter than 6 characters, consider using a stronger password"
+          fi
+          
+          echo "Using validated credentials:"
+          echo "  - Admin username: '$$ADMIN_USERNAME'"
+          echo "  - Password strength: $$(echo "$$ADMIN_PASSWORD" | sed 's/./*/g') ($${#ADMIN_PASSWORD} chars)"
+          
+          # Check if users.json already exists (preserve existing configuration)
+          USERS_FILE="/opt/airflow/config/users.json"
+          
+          if [ ! -f "$$USERS_FILE" ]; then
+            echo "Creating new users.json file..."
+            
+            # Create users.json file for Simple Auth Manager using environment variables
+            # Note: Simple Auth Manager in Airflow 3.1.0 uses a specific format
+            if cat > "$$USERS_FILE" << EOF
+        {
+          "$$ADMIN_USERNAME": "$$ADMIN_PASSWORD"
+        }
+        EOF
+            then
+              echo "SUCCESS: Simple Auth Manager users file created successfully!"
+              echo "  - File location: $$USERS_FILE"
+              echo "  - Admin user: '$$ADMIN_USERNAME' with Admin role"
+              echo "  - Authentication method: Simple Auth Manager"
+              
+              # Verify file was created correctly
+              if [ -f "$$USERS_FILE" ] && [ -s "$$USERS_FILE" ]; then
+                echo "  - File verification: PASSED (file exists and is not empty)"
+                FILE_SIZE=$$(wc -c < "$$USERS_FILE" 2>/dev/null || echo "unknown")
+                echo "  - File size: $$FILE_SIZE bytes"
+              else
+                echo "ERROR: File verification failed - users.json was not created properly"
+                return 1
+              fi
+              
+              # Set appropriate file permissions for security
+              if chmod 600 "$$USERS_FILE" 2>/dev/null; then
+                echo "  - File permissions: Set to 600 (owner read/write only)"
+              else
+                echo "WARNING: Could not set restrictive permissions on users.json file"
+              fi
+              
+            else
+              echo "ERROR: Failed to create users.json file"
+              echo "Possible causes:"
+              echo "  - Insufficient disk space"
+              echo "  - Permission denied to write to /opt/airflow/config/"
+              echo "  - File system is read-only"
+              return 1
+            fi
+            
+          else
+            echo "Existing users.json file detected:"
+            echo "  - File location: $$USERS_FILE"
+            
+            # Verify existing file is readable and valid JSON
+            if [ -r "$$USERS_FILE" ]; then
+              FILE_SIZE=$$(wc -c < "$$USERS_FILE" 2>/dev/null || echo "unknown")
+              echo "  - File size: $$FILE_SIZE bytes"
+              echo "  - File permissions: $$(ls -l "$$USERS_FILE" 2>/dev/null | cut -d' ' -f1 || echo 'unknown')"
+              
+              # Basic JSON validation
+              if python3 -c "import json; json.load(open('$$USERS_FILE'))" 2>/dev/null; then
+                echo "  - JSON validation: PASSED"
+                
+                # Check if current username exists in file
+                if python3 -c "import json; users=json.load(open('$$USERS_FILE')); exit(0 if '$$ADMIN_USERNAME' in users else 1)" 2>/dev/null; then
+                  echo "  - Current admin user '$$ADMIN_USERNAME': FOUND in existing file"
+                else
+                  echo "  - Current admin user '$$ADMIN_USERNAME': NOT FOUND in existing file"
+                  echo "  - Note: Existing users will remain, new user not added to preserve configuration"
+                fi
+              else
+                echo "  - JSON validation: FAILED (file may be corrupted)"
+                echo "WARNING: Existing users.json file appears to be invalid JSON"
+              fi
+            else
+              echo "  - File accessibility: FAILED (cannot read file)"
+              echo "ERROR: Existing users.json file is not readable"
+              return 1
+            fi
+            
+            echo "PRESERVED: Existing Simple Auth Manager configuration maintained"
+            echo "To update admin credentials:"
+            echo "  1. Stop Airflow services: docker compose down"
+            echo "  2. Remove existing file: rm /path/to/config/users.json"
+            echo "  3. Update environment variables in .env file"
+            echo "  4. Restart services: docker compose up -d"
+          fi
+          
+          echo "=== Simple Auth Manager User Configuration Complete ==="
+          return 0
+        }
+        
+        # Main initialization process
+        echo "=== Airflow Database Initialization Started ==="
+        echo "Airflow version: $$(airflow version)"
+        echo "Database URL: $$AIRFLOW__DATABASE__SQL_ALCHEMY_CONN"
+        
+        # Step 1: Check database connectivity
+        if ! check_db; then
+          echo "ERROR: Database connectivity check failed!"
+          exit 1
+        fi
+        
+        # Step 2: Run database migration
+        if ! migrate_db; then
+          echo "ERROR: Database migration failed!"
+          exit 1
+        fi
+        
+        # Step 3: Create admin user configuration
+        if ! create_admin_user; then
+          echo "ERROR: Admin user setup failed!"
+          exit 1
+        fi
+        
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'false'  # We handle user creation manually for Simple Auth
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - airflow-network
+    restart: "no"  # Run once and exit
+
+  # Airflow API Server Service (replaces webserver in Airflow 3.x)
+  airflow-api-server:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "8080:8080"
+    networks:
+      - airflow-network
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    environment:
+      <<: *airflow-common-env
+      # API Server specific configuration
+      AIRFLOW__API__ENABLE_EXPERIMENTAL_API: 'false'
+      AIRFLOW__API__MAXIMUM_PAGE_LIMIT: 100
+      AIRFLOW__API__FALLBACK_PAGE_LIMIT: 100
+      
+      # API Server Configuration (Airflow 3.x)
+      AIRFLOW__API__PORT: 8080
+      AIRFLOW__API__HOST: '0.0.0.0'
+      AIRFLOW__API__WORKERS: 4
+      AIRFLOW__API__WORKER_TIMEOUT: 120
+      AIRFLOW__API__WORKER_REFRESH_BATCH_SIZE: 1
+      AIRFLOW__API__WORKER_REFRESH_INTERVAL: 6000
+      
+      # Security Configuration for API Server
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'true'
+      AIRFLOW__WEBSERVER__EXPOSE_HOSTNAME: 'true'
+      AIRFLOW__WEBSERVER__EXPOSE_STACKTRACE: 'true'
+      
+      # Session Configuration
+      AIRFLOW__WEBSERVER__SESSION_LIFETIME_MINUTES: 43200  # 30 days
+      AIRFLOW__WEBSERVER__FORCE_LOG_OUT_AFTER: 0
+      
+      # CSRF Protection
+      AIRFLOW__WEBSERVER__ENABLE_PROXY_FIX: 'false'
+      AIRFLOW__WEBSERVER__PROXY_FIX_X_FOR: 1
+      AIRFLOW__WEBSERVER__PROXY_FIX_X_PROTO: 1
+      AIRFLOW__WEBSERVER__PROXY_FIX_X_HOST: 1
+      AIRFLOW__WEBSERVER__PROXY_FIX_X_PORT: 1
+      AIRFLOW__WEBSERVER__PROXY_FIX_X_PREFIX: 1
+
+  # Airflow API Server Service (CeleryExecutor mode)
+  airflow-api-server-celery:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "8080:8080"
+    networks:
+      - airflow-network
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    environment:
+      <<: *airflow-common-env
+      # Override executor for CeleryExecutor mode
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      
+      # Celery Configuration for API Server
+      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
+      AIRFLOW__CELERY__BROKER_URL: redis://:airflow@redis:6379/0
+      
+      # API Server specific configuration
+      AIRFLOW__API__ENABLE_EXPERIMENTAL_API: 'false'
+      AIRFLOW__API__MAXIMUM_PAGE_LIMIT: 100
+      AIRFLOW__API__FALLBACK_PAGE_LIMIT: 100
+      
+      # API Server Configuration (Airflow 3.x)
+      AIRFLOW__API__PORT: 8080
+      AIRFLOW__API__HOST: '0.0.0.0'
+      AIRFLOW__API__WORKERS: 4
+      AIRFLOW__API__WORKER_TIMEOUT: 120
+      AIRFLOW__API__WORKER_REFRESH_BATCH_SIZE: 1
+      AIRFLOW__API__WORKER_REFRESH_INTERVAL: 6000
+      
+      # Security Configuration for API Server
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'true'
+      AIRFLOW__WEBSERVER__EXPOSE_HOSTNAME: 'true'
+      AIRFLOW__WEBSERVER__EXPOSE_STACKTRACE: 'true'
+      
+      # Session Configuration
+      AIRFLOW__WEBSERVER__SESSION_LIFETIME_MINUTES: 43200  # 30 days
+      AIRFLOW__WEBSERVER__FORCE_LOG_OUT_AFTER: 0
+      
+      # CSRF Protection
+      AIRFLOW__WEBSERVER__ENABLE_PROXY_FIX: 'false'
+      AIRFLOW__WEBSERVER__PROXY_FIX_X_FOR: 1
+      AIRFLOW__WEBSERVER__PROXY_FIX_X_PROTO: 1
+      AIRFLOW__WEBSERVER__PROXY_FIX_X_HOST: 1
+      AIRFLOW__WEBSERVER__PROXY_FIX_X_PORT: 1
+      AIRFLOW__WEBSERVER__PROXY_FIX_X_PREFIX: 1
+    depends_on:
+      <<: *airflow-common-depends-on
+      redis:
+        condition: service_healthy
+    profiles:
+      - celery  # Only included when using CeleryExecutor
+  # Airflow Scheduler Service
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    networks:
+      - airflow-network
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname \"$${HOSTNAME}\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    environment:
+      <<: *airflow-common-env
+      # Scheduler specific configuration
+      AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: 300
+      AIRFLOW__SCHEDULER__CATCHUP_BY_DEFAULT: 'false'
+      AIRFLOW__SCHEDULER__MAX_THREADS: 2
+      AIRFLOW__SCHEDULER__PROCESSOR_POLL_INTERVAL: 1
+      AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: 30
+      AIRFLOW__SCHEDULER__PRINT_STATS_INTERVAL: 30
+      AIRFLOW__SCHEDULER__SCHEDULER_HEARTBEAT_SEC: 5
+      AIRFLOW__SCHEDULER__NUM_RUNS: -1
+      AIRFLOW__SCHEDULER__USE_ROW_LEVEL_LOCKING: 'true'
+      AIRFLOW__SCHEDULER__ALLOW_TRIGGER_IN_FUTURE: 'false'
+      
+      # Task execution configuration
+      AIRFLOW__SCHEDULER__MAX_TIS_PER_QUERY: 512
+      AIRFLOW__SCHEDULER__SCHEDULE_AFTER_TASK_EXECUTION: 'true'
+      
+      # Performance tuning
+      AIRFLOW__SCHEDULER__PARSING_PROCESSES: 2
+      AIRFLOW__SCHEDULER__MAX_DAGRUNS_TO_CREATE_PER_LOOP: 10
+      AIRFLOW__SCHEDULER__MAX_DAGRUNS_PER_LOOP_TO_SCHEDULE: 20
+      
+      # Health check configuration
+      AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+      AIRFLOW__SCHEDULER__HEALTH_CHECK_THRESHOLD: 30
+    depends_on:
+      <<: *airflow-common-depends-on
+      redis:
+        condition: service_healthy
+        required: false  # Only required for CeleryExecutor
+    profiles:
+      - ""  # Always included (default profile)
+
+  # Airflow Scheduler Service (CeleryExecutor mode)
+  airflow-scheduler-celery:
+    <<: *airflow-common
+    command: scheduler
+    networks:
+      - airflow-network
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname \"${HOSTNAME}\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    environment:
+      <<: *airflow-common-env
+      # Override executor for CeleryExecutor mode
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      
+      # Celery Configuration for Scheduler
+      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
+      AIRFLOW__CELERY__BROKER_URL: redis://:airflow@redis:6379/0
+      
+      # Scheduler specific configuration
+      AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: 300
+      AIRFLOW__SCHEDULER__CATCHUP_BY_DEFAULT: 'false'
+      AIRFLOW__SCHEDULER__MAX_THREADS: 2
+      AIRFLOW__SCHEDULER__PROCESSOR_POLL_INTERVAL: 1
+      AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: 30
+      AIRFLOW__SCHEDULER__PRINT_STATS_INTERVAL: 30
+      AIRFLOW__SCHEDULER__SCHEDULER_HEARTBEAT_SEC: 5
+      AIRFLOW__SCHEDULER__NUM_RUNS: -1
+      AIRFLOW__SCHEDULER__USE_ROW_LEVEL_LOCKING: 'true'
+      AIRFLOW__SCHEDULER__ALLOW_TRIGGER_IN_FUTURE: 'false'
+      
+      # Task execution configuration
+      AIRFLOW__SCHEDULER__MAX_TIS_PER_QUERY: 512
+      AIRFLOW__SCHEDULER__SCHEDULE_AFTER_TASK_EXECUTION: 'true'
+      
+      # Performance tuning
+      AIRFLOW__SCHEDULER__PARSING_PROCESSES: 2
+      AIRFLOW__SCHEDULER__MAX_DAGRUNS_TO_CREATE_PER_LOOP: 10
+      AIRFLOW__SCHEDULER__MAX_DAGRUNS_PER_LOOP_TO_SCHEDULE: 20
+      
+      # Health check configuration
+      AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+      AIRFLOW__SCHEDULER__HEALTH_CHECK_THRESHOLD: 30
+    depends_on:
+      <<: *airflow-common-depends-on
+      redis:
+        condition: service_healthy
+    profiles:
+      - celery  # Only included when using CeleryExecutor
+
+  # Airflow DAG Processor Service
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    networks:
+      - airflow-network
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type DagProcessorJob --hostname \"${HOSTNAME}\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    environment:
+      <<: *airflow-common-env
+      # DAG Processor specific configuration
+      AIRFLOW__SCHEDULER__STANDALONE_DAG_PROCESSOR: 'true'
+      AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL: 300
+      AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: 30
+      AIRFLOW__SCHEDULER__PROCESSOR_POLL_INTERVAL: 1
+      AIRFLOW__SCHEDULER__PARSING_PROCESSES: 2
+      AIRFLOW__SCHEDULER__MAX_THREADS: 2
+      
+      # DAG parsing configuration
+      AIRFLOW__CORE__DAGBAG_IMPORT_TIMEOUT: 30
+      AIRFLOW__CORE__DAGBAG_IMPORT_ERROR_TRACEBACKS: 'true'
+      AIRFLOW__CORE__DAGBAG_IMPORT_ERROR_TRACEBACK_DEPTH: 2
+      AIRFLOW__CORE__DAG_FILE_PROCESSOR_TIMEOUT: 50
+      
+      # Performance tuning for DAG processing
+      AIRFLOW__CORE__COMPRESS_SERIALIZED_DAGS: 'true'
+      AIRFLOW__CORE__MAX_NUM_RENDERED_TI_FIELDS_PER_TASK: 30
+      
+      # Health check configuration
+      AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+      AIRFLOW__SCHEDULER__HEALTH_CHECK_THRESHOLD: 30
+    depends_on:
+      <<: *airflow-common-depends-on
+    profiles:
+      - ""  # Always included (default profile)
+
+  # Airflow Triggerer Service
+  airflow-triggerer:
+    <<: *airflow-common
+    command: triggerer
+    networks:
+      - airflow-network
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type TriggererJob --hostname \"${HOSTNAME}\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    environment:
+      <<: *airflow-common-env
+      # Triggerer specific configuration
+      AIRFLOW__TRIGGERER__CAPACITY: 1000
+      AIRFLOW__TRIGGERER__JOB_HEARTBEAT_SEC: 5
+      AIRFLOW__TRIGGERER__CLEANUP_INTERVAL: 60
+      
+      # Async task configuration
+      AIRFLOW__CORE__CHECK_SLAS: 'true'
+      AIRFLOW__CORE__ENABLE_XCOM_PICKLING: 'false'
+      
+      # Performance tuning for triggerer
+      AIRFLOW__TRIGGERER__TRIGGER_TIMEOUT_CHECK_INTERVAL: 15
+      AIRFLOW__TRIGGERER__TRIGGER_LOG_RETENTION_DAYS: 7
+      
+      # Health check configuration
+      AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+      AIRFLOW__SCHEDULER__HEALTH_CHECK_THRESHOLD: 30
+      
+      # Logging configuration for triggerer
+      AIRFLOW__LOGGING__TRIGGERER_LOG_LEVEL: INFO
+      AIRFLOW__LOGGING__ENABLE_TASK_CONTEXT_LOGGER: 'true'
+    depends_on:
+      <<: *airflow-common-depends-on
+    profiles:
+      - ""  # Always included (default profile)
+
+  # Airflow Worker Service (for CeleryExecutor)
+  airflow-worker:
+    <<: *airflow-common
+    command: celery worker
+    networks:
+      - airflow-network
+    healthcheck:
+      test: ["CMD-SHELL", "celery --app airflow.providers.celery.executors.celery_executor.app inspect ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    environment:
+      <<: *airflow-common-env
+      # Override executor for CeleryExecutor mode
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      
+      # Celery Configuration
+      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
+      AIRFLOW__CELERY__BROKER_URL: redis://:airflow@redis:6379/0
+      AIRFLOW__CELERY__FLOWER_HOST: 0.0.0.0
+      AIRFLOW__CELERY__FLOWER_PORT: 5555
+      
+      # Worker Configuration
+      AIRFLOW__CELERY__WORKER_CONCURRENCY: 16
+      AIRFLOW__CELERY__WORKER_AUTOSCALE: 16,4
+      AIRFLOW__CELERY__WORKER_MAX_TASKS_PER_CHILD: 1000
+      AIRFLOW__CELERY__WORKER_MAX_MEMORY_PER_CHILD: 8192  # 8GB in MB
+      AIRFLOW__CELERY__WORKER_PREFETCH_MULTIPLIER: 1
+      AIRFLOW__CELERY__TASK_ACKS_LATE: 'true'
+      AIRFLOW__CELERY__TASK_REJECT_ON_WORKER_LOST: 'true'
+      
+      # Task execution configuration
+      AIRFLOW__CELERY__TASK_TRACK_STARTED: 'true'
+      AIRFLOW__CELERY__TASK_TIME_LIMIT: 1200  # 20 minutes
+      AIRFLOW__CELERY__TASK_SOFT_TIME_LIMIT: 1080  # 18 minutes
+      AIRFLOW__CELERY__WORKER_DISABLE_RATE_LIMITS: 'false'
+      
+      # Performance and reliability settings
+      AIRFLOW__CELERY__BROKER_TRANSPORT_OPTIONS__VISIBILITY_TIMEOUT: 21600  # 6 hours
+      AIRFLOW__CELERY__BROKER_TRANSPORT_OPTIONS__FANOUT_PREFIX: 'true'
+      AIRFLOW__CELERY__BROKER_TRANSPORT_OPTIONS__FANOUT_PATTERNS: 'true'
+      AIRFLOW__CELERY__RESULT_BACKEND_TRANSPORT_OPTIONS__MASTER_NAME: 'mymaster'
+      
+      # Logging configuration for worker
+      AIRFLOW__LOGGING__CELERY_LOGGING_LEVEL: INFO
+      AIRFLOW__LOGGING__WORKER_LOG_SERVER_PORT: 8793
+      
+      # Security configuration
+      AIRFLOW__CELERY__SSL_ACTIVE: 'false'
+      AIRFLOW__CELERY__SSL_CERT: ''
+      AIRFLOW__CELERY__SSL_KEY: ''
+      
+      # Health check configuration
+      AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+      AIRFLOW__SCHEDULER__HEALTH_CHECK_THRESHOLD: 30
+      
+      # Worker heartbeat and monitoring
+      AIRFLOW__CELERY__WORKER_SEND_TASK_EVENTS: 'true'
+      AIRFLOW__CELERY__TASK_SEND_SENT_EVENT: 'true'
+      AIRFLOW__CELERY__WORKER_HIJACK_ROOT_LOGGER: 'false'
+      
+      # Pool configuration for task execution
+      AIRFLOW__CELERY__DEFAULT_QUEUE: 'default'
+      AIRFLOW__CELERY__SYNC_PARALLELISM: 0  # Use worker concurrency
+      
+      # Error handling and retry configuration
+      AIRFLOW__CELERY__TASK_ALWAYS_EAGER: 'false'
+      AIRFLOW__CELERY__TASK_EAGER_PROPAGATES: 'true'
+      AIRFLOW__CELERY__TASK_IGNORE_RESULT: 'false'
+      AIRFLOW__CELERY__TASK_STORE_EAGER_RESULT: 'true'
+    depends_on:
+      <<: *airflow-common-depends-on
+      redis:
+        condition: service_healthy
+    profiles:
+      - celery  # Only included when using CeleryExecutor
+
+  # Flower Service (Celery Monitoring)
+  flower:
+    <<: *airflow-common
+    command: celery flower
+    ports:
+      - "5555:5555"
+    networks:
+      - airflow-network
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:5555/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    environment:
+      <<: *airflow-common-env
+      # Override executor for CeleryExecutor mode
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      
+      # Celery Configuration for Flower
+      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
+      AIRFLOW__CELERY__BROKER_URL: redis://:airflow@redis:6379/0
+      
+      # Flower Configuration
+      AIRFLOW__CELERY__FLOWER_HOST: 0.0.0.0
+      AIRFLOW__CELERY__FLOWER_PORT: 5555
+      AIRFLOW__CELERY__FLOWER_URL_PREFIX: ''
+      AIRFLOW__CELERY__FLOWER_BASIC_AUTH: ''  # Set to 'user:password' for basic auth
+      
+      # Flower UI Configuration
+      CELERY_FLOWER_HOST: 0.0.0.0
+      CELERY_FLOWER_PORT: 5555
+      FLOWER_PORT: 5555
+      
+      # Monitoring Configuration
+      AIRFLOW__CELERY__WORKER_SEND_TASK_EVENTS: 'true'
+      AIRFLOW__CELERY__TASK_SEND_SENT_EVENT: 'true'
+      
+      # Flower specific environment variables
+      FLOWER_BROKER_API: redis://:airflow@redis:6379/0
+      FLOWER_BASIC_AUTH: ''  # Optional: Set to 'username:password' for authentication
+      
+      # Performance settings for monitoring
+      AIRFLOW__CELERY__FLOWER_DB: '/tmp/flower.db'
+      AIRFLOW__CELERY__FLOWER_PERSISTENT: 'true'
+      AIRFLOW__CELERY__FLOWER_STATE_SAVE_INTERVAL: 1000
+      
+      # Security settings
+      AIRFLOW__CELERY__FLOWER_CERTFILE: ''
+      AIRFLOW__CELERY__FLOWER_KEYFILE: ''
+      AIRFLOW__CELERY__FLOWER_CA_CERTS: ''
+      AIRFLOW__CELERY__FLOWER_CERT_REQS: 'none'
+    depends_on:
+      <<: *airflow-common-depends-on
+      redis:
+        condition: service_healthy
+    profiles:
+      - flower  # Profile-based activation for optional Flower service
