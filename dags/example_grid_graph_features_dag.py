@@ -67,26 +67,6 @@ def initialize_pipeline(**context) -> Dict[str, Any]:
 def data_extraction_group():
     """Task group for data extraction"""
 
-    @task
-    def extract_us_east(config: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract data from US East region"""
-        print("Extracting data from US East region...")
-        return {
-            "region": "us-east-1",
-            "records_extracted": random.randint(800, 1200),
-            "status": "success",
-        }
-
-    @task
-    def extract_us_west(config: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract data from US West region"""
-        print("Extracting data from US West region...")
-        return {
-            "region": "us-west-2",
-            "records_extracted": random.randint(700, 1100),
-            "status": "success",
-        }
-
     # Get the config from the upstream task
     @task
     def extract_us_east(config: Dict[str, Any]) -> Dict[str, Any]:

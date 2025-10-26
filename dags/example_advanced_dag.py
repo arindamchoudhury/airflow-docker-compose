@@ -272,12 +272,13 @@ final_task = final_aggregation()
 start_task >> extract_task
 extract_task >> transform_task
 
-# Get the quality check tasks
-quality_check_tasks = quality_checks
-# Apply each quality check task with the transform_task data
-quality_check_instances = [task(transform_task) for task in quality_check_tasks]
-# Set up dependencies
-transform_task >> quality_check_instances >> branch_task
+# Set up dependencies for quality checks
+# The quality_checks list contains the task functions
+for task in quality_checks:
+    # Create task instance by calling the task with the transform_task data
+    task_instance = task(transform_task)
+    # Set up the dependency chain
+    transform_task >> task_instance >> branch_task
 
 # Branch dependencies
 branch_task >> [high_processing, low_processing]
