@@ -13,6 +13,7 @@ redis-data-volume/
 
 # Python cache files
 __pycache__/
+dags/__pycache__/
 *.pyc
 *.pyo
 *.pyd

@@ -12,9 +12,9 @@ Requirements covered: 1.4, 3.4
 
 from datetime import datetime, timedelta
 from airflow import DAG
-from airflow.operators.bash import BashOperator
-from airflow.operators.python import PythonOperator
-from airflow.operators.empty import EmptyOperator
+from airflow.providers.standard.operators.bash import BashOperator
+from airflow.providers.standard.operators.python import PythonOperator
+from airflow.providers.standard.operators.empty import EmptyOperator
 
 
 def print_hello_world():
@@ -28,49 +28,62 @@ def print_hello_world():
 def process_data(**context):
     """
     Example function that demonstrates context usage and data processing
-    
+
     Args:
-        **context: Airflow context containing execution date, task instance, etc.
+        **context: Airflow context containing logical_date (formerly execution_date),
+                  task instance, data interval, and other metadata.
     """
-    execution_date = context['execution_date']
-    task_instance = context['task_instance']
-    
-    print(f"Processing data for execution date: {execution_date}")
+    logical_date = context[
+        "logical_date"
+    ]  # This replaces execution_date in Airflow 3.x
+    task_instance = context["task_instance"]
+    data_interval_start = context["data_interval_start"]
+    data_interval_end = context["data_interval_end"]
+
+    print(f"Processing data for logical date: {logical_date}")
     print(f"Task instance: {task_instance.task_id}")
-    
+    print(f"Data interval: {data_interval_start} to {data_interval_end}")
+
     # Simulate some data processing
-    data = {"processed_records": 100, "execution_date": str(execution_date)}
-    
+    data = {
+        "processed_records": 100,
+        "logical_date": str(logical_date),
+        "data_interval": {
+            "start": str(data_interval_start),
+            "end": str(data_interval_end),
+        },
+    }
+
     # Return data that can be used by downstream tasks
     return data
 
 
 # Default arguments for the DAG
 default_args = {
-    'owner': 'airflow-developer',
-    'depends_on_past': False,
-    'start_date': datetime(2024, 1, 1),
-    'email_on_failure': False,
-    'email_on_retry': False,
-    'retries': 1,
-    'retry_delay': timedelta(minutes=5),
+    "owner": "airflow-developer",
+    "depends_on_past": False,
+    "start_date": datetime(2024, 1, 1),
+    "email_on_failure": False,
+    "email_on_retry": False,
+    "retries": 1,
+    "retry_delay": timedelta(minutes=5),
 }
 
 # DAG definition using Airflow 3.1.0 syntax
 dag = DAG(
-    'example_basic_dag',
+    "example_basic_dag",
     default_args=default_args,
-    description='A basic example DAG for Airflow 3.1.0',
+    description="A basic example DAG for Airflow 3.1.0",
     schedule=timedelta(days=1),
     start_date=datetime(2024, 1, 1),
     catchup=False,
-    tags=['example', 'basic', 'airflow-3.1.0'],
+    tags=["example", "basic", "airflow-3.1.0"],
     doc_md=__doc__,
 )
 
 # Task 1: Start task (EmptyOperator)
 start_task = EmptyOperator(
-    task_id='start',
+    task_id="start",
     dag=dag,
     doc_md="""
     ### Start Task
@@ -81,7 +94,7 @@ start_task = EmptyOperator(
 
 # Task 2: Hello World Python task
 hello_world_task = PythonOperator(
-    task_id='hello_world',
+    task_id="hello_world",
     python_callable=print_hello_world,
     dag=dag,
     doc_md="""
@@ -93,9 +106,8 @@ hello_world_task = PythonOperator(
 
 # Task 3: Data processing task
 process_data_task = PythonOperator(
-    task_id='process_data',
+    task_id="process_data",
     python_callable=process_data,
-
     dag=dag,
     doc_md="""
     ### Process Data Task
@@ -106,7 +118,7 @@ process_data_task = PythonOperator(
 
 # Task 4: System information task using BashOperator
 system_info_task = BashOperator(
-    task_id='system_info',
+    task_id="system_info",
     bash_command='echo "System: $(uname -a)" && echo "Date: $(date)" && echo "User: $(whoami)"',
     dag=dag,
     doc_md="""
@@ -118,7 +130,7 @@ system_info_task = BashOperator(
 
 # Task 5: End task
 end_task = EmptyOperator(
-    task_id='end',
+    task_id="end",
     dag=dag,
     doc_md="""
     ### End Task
