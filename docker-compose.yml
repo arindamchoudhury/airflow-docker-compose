@@ -4,30 +4,35 @@ x-airflow-common:
   environment:
     &airflow-common-env
     # Core Airflow Configuration
-    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_SIZE: 20
+    AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_TIMEOUT: 30
+    AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_OVERFLOW: 10
+    AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_RECYCLE: 1800
+    AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_PRE_PING: 'true'
     AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
     
-    # API Configuration for JWT Token Support
+    # API and Authentication Configuration (Airflow 3.1.0)
+    AIRFLOW__CORE__AUTH_MANAGER: 'airflow.api_fastapi.auth.managers.simple.simple_auth_manager.SimpleAuthManager'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+    AIRFLOW__API__ENABLE_AUTH_RATE_LIMITING: 'true'
+    AIRFLOW__API__ENABLE_EXPERIMENTAL_API: 'false'
+    
+    # JWT Configuration (Airflow 3.1.0 Standard)
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_SECRET_KEY}
+    AIRFLOW__API_AUTH__JWT_ALGORITHM: 'HS256'
+    AIRFLOW__API_AUTH__JWT_EXPIRATION_DELTA_SECONDS: 86400
+    
+    # API Access Control
     AIRFLOW__API__ACCESS_CONTROL_ALLOW_HEADERS: 'origin, content-type, accept, authorization, x-requested-with'
     AIRFLOW__API__ACCESS_CONTROL_ALLOW_METHODS: 'POST, GET, OPTIONS, DELETE, PUT'
     AIRFLOW__API__ACCESS_CONTROL_ALLOW_ORIGIN: '*'
+    
+    # Health Check
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
-    
-    # Simple Auth Manager Configuration (Default for Airflow 3.1.0)
-    AIRFLOW__CORE__AUTH_MANAGER: 'airflow.api_fastapi.auth.managers.simple.simple_auth_manager.SimpleAuthManager'
-    # Let Simple Auth Manager auto-generate passwords (recommended approach)
-    # Passwords will be stored in: /opt/airflow/simple_auth_manager_passwords.json.generated
-    
-    # JWT Token Configuration for Simple Auth Manager (Airflow 3.1.0)
-    AIRFLOW__API__SECRET_KEY: ${AIRFLOW_SECRET_KEY:-your-secret-key-change-in-production}
-    AIRFLOW__SIMPLE_AUTH_MANAGER__JWT_SECRET_KEY: ${AIRFLOW_SECRET_KEY:-your-secret-key-change-in-production}
-    AIRFLOW__SIMPLE_AUTH_MANAGER__JWT_ALGORITHM: 'HS256'
-    AIRFLOW__SIMPLE_AUTH_MANAGER__JWT_EXPIRATION_DELTA: 86400  # 24 hours in seconds
-    AIRFLOW__SIMPLE_AUTH_MANAGER__JWT_REFRESH_DELTA: 604800   # 7 days in seconds
     
     # Logging Configuration
     AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
@@ -382,7 +387,7 @@ services:
       AIRFLOW__CELERY__BROKER_URL: redis://:airflow@redis:6379/0
       
       # Scheduler specific configuration
-      AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: 300
+      AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL: 300
       AIRFLOW__SCHEDULER__CATCHUP_BY_DEFAULT: 'false'
       AIRFLOW__SCHEDULER__MAX_THREADS: 2
       AIRFLOW__SCHEDULER__PROCESSOR_POLL_INTERVAL: 1
@@ -430,10 +435,10 @@ services:
       # DAG Processor specific configuration
       AIRFLOW__SCHEDULER__STANDALONE_DAG_PROCESSOR: 'true'
       AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL: 300
-      AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: 30
-      AIRFLOW__SCHEDULER__PROCESSOR_POLL_INTERVAL: 1
-      AIRFLOW__SCHEDULER__PARSING_PROCESSES: 2
-      AIRFLOW__SCHEDULER__MAX_THREADS: 2
+      AIRFLOW__DAG_PROCESSOR__MIN_FILE_PROCESS_INTERVAL: 30
+      AIRFLOW__DAG_PROCESSOR__PROCESSOR_POLL_INTERVAL: 1
+      AIRFLOW__DAG_PROCESSOR__PARSING_PROCESSES: 2
+      AIRFLOW__DAG_PROCESSOR__MAX_THREADS: 2
       
       # DAG parsing configuration
       AIRFLOW__CORE__DAGBAG_IMPORT_TIMEOUT: 30
@@ -516,47 +521,72 @@ services:
       AIRFLOW__CORE__EXECUTOR: CeleryExecutor
       
       # Celery Configuration
-      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
+      AIRFLOW__CELERY__RESULT_BACKEND: redis://:airflow@redis:6379/0
       AIRFLOW__CELERY__BROKER_URL: redis://:airflow@redis:6379/0
       AIRFLOW__CELERY__FLOWER_HOST: 0.0.0.0
       AIRFLOW__CELERY__FLOWER_PORT: 5555
       
-      # API Server Connection Configuration for Workers (Airflow 3.x)
-      AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server-celery:8080/execution/
+      # Celery Task Result Settings
+      AIRFLOW__CELERY__RESULT_EXPIRES: 21600  # 6 hours
+      AIRFLOW__CELERY__RESULT_EXTENDED: 'true'
+      AIRFLOW__CELERY__RESULT_SERIALIZER: 'json'
+      AIRFLOW__CELERY__ACCEPT_CONTENT: 'json'
+      
+      # Task Execution API Configuration (Airflow 3.1.0)
+      AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-api-server-celery:8080/execution/'
       AIRFLOW__CORE__REMOTE_BASE_LOG_FOLDER: ''
       AIRFLOW__CORE__REMOTE_LOG_CONN_ID: ''
       
-      # JWT Configuration - Standardized across all services
-      AIRFLOW__API__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
+      # Worker Authentication (Airflow 3.1.0)
+      AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_SECRET_KEY}
+      AIRFLOW__API_AUTH__JWT_ALGORITHM: 'HS256'
+      AIRFLOW__API_AUTH__JWT_EXPIRATION_DELTA_SECONDS: 86400
+      
+      # Simple Auth Manager Configuration
       AIRFLOW__SIMPLE_AUTH_MANAGER__JWT_SECRET_KEY: ${AIRFLOW_SECRET_KEY}
       AIRFLOW__SIMPLE_AUTH_MANAGER__JWT_ALGORITHM: 'HS256'
-      AIRFLOW__SIMPLE_AUTH_MANAGER__JWT_EXPIRATION_DELTA: 86400  # 24 hours in seconds
-      AIRFLOW__SIMPLE_AUTH_MANAGER__JWT_REFRESH_DELTA: 604800   # 7 days in seconds
-      
-      # API Authentication for worker-to-API communication (Airflow 3.x)
-      # This is the correct JWT secret for Task Execution API
-      AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_SECRET_KEY}
+      AIRFLOW__SIMPLE_AUTH_MANAGER__JWT_EXPIRATION_DELTA: 86400
+      AIRFLOW__SIMPLE_AUTH_MANAGER__JWT_REFRESH_DELTA: 604800
       
       # Worker Configuration
-      AIRFLOW__CELERY__WORKER_CONCURRENCY: 16
-      AIRFLOW__CELERY__WORKER_AUTOSCALE: 16,4
-      AIRFLOW__CELERY__WORKER_MAX_TASKS_PER_CHILD: 1000
-      AIRFLOW__CELERY__WORKER_MAX_MEMORY_PER_CHILD: 8192  # 8GB in MB
+      AIRFLOW__CELERY__WORKER_CONCURRENCY: 8  # Reduced for better stability
+      AIRFLOW__CELERY__WORKER_AUTOSCALE: 8,2
+      AIRFLOW__CELERY__WORKER_MAX_TASKS_PER_CHILD: 50  # Reduced to prevent memory issues
+      AIRFLOW__CELERY__WORKER_MAX_MEMORY_PER_CHILD: 4096  # 4GB in MB
       AIRFLOW__CELERY__WORKER_PREFETCH_MULTIPLIER: 1
+      AIRFLOW__CELERY__WORKER_SHUTDOWN_TIMEOUT: 30  # Grace period for worker shutdown
       AIRFLOW__CELERY__TASK_ACKS_LATE: 'true'
       AIRFLOW__CELERY__TASK_REJECT_ON_WORKER_LOST: 'true'
       
       # Task execution configuration
       AIRFLOW__CELERY__TASK_TRACK_STARTED: 'true'
-      AIRFLOW__CELERY__TASK_TIME_LIMIT: 1200  # 20 minutes
-      AIRFLOW__CELERY__TASK_SOFT_TIME_LIMIT: 1080  # 18 minutes
-      AIRFLOW__CELERY__WORKER_DISABLE_RATE_LIMITS: 'false'
+      AIRFLOW__CELERY__TASK_TIME_LIMIT: 3600  # 60 minutes
+      AIRFLOW__CELERY__TASK_SOFT_TIME_LIMIT: 3300  # 55 minutes
+      AIRFLOW__CELERY__WORKER_DISABLE_RATE_LIMITS: 'true'
+      AIRFLOW__CELERY__WORKER_ENABLE_REMOTE_CONTROL: 'true'
+      AIRFLOW__CELERY__OPERATION_TIMEOUT: 5.0  # Increased timeout for Celery operations
+      AIRFLOW__CELERY__TASK_ADOPTION_TIMEOUT: 600
+      
+      # State synchronization settings
+      AIRFLOW__CELERY__SYNC_PARALLELISM: 1
+      AIRFLOW__CELERY__TASK_PUBLISH_RETRIES: 3
+      AIRFLOW__CELERY__TASK_PUBLISH_RETRY_DELAY: 1
+      AIRFLOW__CORE__TASK_QUEUED_FOR_EXECUTOR_TIMEOUT: 120
+      AIRFLOW__CORE__KILLED_TASK_CLEANUP_TIME: 60
+      
+      # Result backend settings
+      AIRFLOW__CELERY__RESULT_BACKEND_PERSISTENT: 'true'
+      AIRFLOW__CELERY__RESULT_BACKEND_TRANSPORT_OPTIONS__RETRY_POLICY: '{"timeout": 5.0, "retry_forever": false, "max_retries": 3}'
       
       # Performance and reliability settings
-      AIRFLOW__CELERY__BROKER_TRANSPORT_OPTIONS__VISIBILITY_TIMEOUT: 21600  # 6 hours
+      AIRFLOW__CELERY__BROKER_TRANSPORT_OPTIONS__VISIBILITY_TIMEOUT: 43200  # 12 hours
       AIRFLOW__CELERY__BROKER_TRANSPORT_OPTIONS__FANOUT_PREFIX: 'true'
       AIRFLOW__CELERY__BROKER_TRANSPORT_OPTIONS__FANOUT_PATTERNS: 'true'
       AIRFLOW__CELERY__RESULT_BACKEND_TRANSPORT_OPTIONS__MASTER_NAME: 'mymaster'
+      AIRFLOW__CELERY__BROKER_CONNECTION_TIMEOUT: 30
+      AIRFLOW__CELERY__BROKER_CONNECTION_MAX_RETRIES: 5
+      AIRFLOW__CELERY__RESULT_BACKEND_CONNECTION_TIMEOUT: 30
+      AIRFLOW__CELERY__WORKER_LOST_WAIT_SECONDS: 60
       
       # Logging configuration for worker
       AIRFLOW__LOGGING__CELERY_LOGGING_LEVEL: INFO
@@ -578,7 +608,6 @@ services:
       
       # Pool configuration for task execution
       AIRFLOW__CELERY__DEFAULT_QUEUE: 'default'
-      AIRFLOW__CELERY__SYNC_PARALLELISM: 0  # Use worker concurrency
       
       # Error handling and retry configuration
       AIRFLOW__CELERY__TASK_ALWAYS_EAGER: 'false'
