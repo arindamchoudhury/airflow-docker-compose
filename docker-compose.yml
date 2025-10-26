@@ -19,7 +19,8 @@ x-airflow-common:
     
     # Simple Auth Manager Configuration (Default for Airflow 3.1.0)
     AIRFLOW__CORE__AUTH_MANAGER: 'airflow.api_fastapi.auth.managers.simple.simple_auth_manager.SimpleAuthManager'
-    AIRFLOW__SIMPLE_AUTH_MANAGER__USERS: 'admin:admin'
+    # Let Simple Auth Manager auto-generate passwords (recommended approach)
+    # Passwords will be stored in: /opt/airflow/simple_auth_manager_passwords.json.generated
     
     # JWT Token Configuration for Simple Auth Manager (Airflow 3.1.0)
     AIRFLOW__API__SECRET_KEY: ${AIRFLOW_SECRET_KEY:-your-secret-key-change-in-production}
@@ -238,6 +239,11 @@ services:
       AIRFLOW__WEBSERVER__PROXY_FIX_X_HOST: 1
       AIRFLOW__WEBSERVER__PROXY_FIX_X_PORT: 1
       AIRFLOW__WEBSERVER__PROXY_FIX_X_PREFIX: 1
+      
+      # Task Execution API Authentication (Airflow 3.x)
+      AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_SECRET_KEY}
+    profiles:
+      - local  # Only included with LocalExecutor
 
   # Airflow API Server Service (CeleryExecutor mode)
   airflow-api-server-celery:
@@ -292,6 +298,10 @@ services:
       AIRFLOW__WEBSERVER__PROXY_FIX_X_HOST: 1
       AIRFLOW__WEBSERVER__PROXY_FIX_X_PORT: 1
       AIRFLOW__WEBSERVER__PROXY_FIX_X_PREFIX: 1
+      
+      # API Authentication for worker-to-API communication (Airflow 3.x)
+      # This is the correct JWT secret for Task Execution API
+      AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_SECRET_KEY}
     depends_on:
       <<: *airflow-common-depends-on
       redis:
@@ -337,13 +347,17 @@ services:
       # Health check configuration
       AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
       AIRFLOW__SCHEDULER__HEALTH_CHECK_THRESHOLD: 30
+      
+      # Task Execution API Authentication (Airflow 3.x)
+      AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_SECRET_KEY}
+      AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
     depends_on:
       <<: *airflow-common-depends-on
       redis:
         condition: service_healthy
         required: false  # Only required for CeleryExecutor
     profiles:
-      - ""  # Always included (default profile)
+      - local  # Only included with LocalExecutor
 
   # Airflow Scheduler Service (CeleryExecutor mode)
   airflow-scheduler-celery:
@@ -438,6 +452,7 @@ services:
       <<: *airflow-common-depends-on
     profiles:
       - ""  # Always included (default profile)
+      - celery  # Also included with CeleryExecutor
 
   # Airflow Triggerer Service
   airflow-triggerer:
@@ -478,6 +493,7 @@ services:
       <<: *airflow-common-depends-on
     profiles:
       - ""  # Always included (default profile)
+      - celery  # Also included with CeleryExecutor
 
   # Airflow Worker Service (for CeleryExecutor)
   airflow-worker:
@@ -492,6 +508,8 @@ services:
       retries: 5
       start_period: 30s
     restart: always
+    deploy:
+      replicas: ${NUMBER_OF_WORKERS:-1}
     environment:
       <<: *airflow-common-env
       # Override executor for CeleryExecutor mode
@@ -502,6 +520,22 @@ services:
       AIRFLOW__CELERY__BROKER_URL: redis://:airflow@redis:6379/0
       AIRFLOW__CELERY__FLOWER_HOST: 0.0.0.0
       AIRFLOW__CELERY__FLOWER_PORT: 5555
+      
+      # API Server Connection Configuration for Workers (Airflow 3.x)
+      AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server-celery:8080/execution/
+      AIRFLOW__CORE__REMOTE_BASE_LOG_FOLDER: ''
+      AIRFLOW__CORE__REMOTE_LOG_CONN_ID: ''
+      
+      # JWT Configuration - Standardized across all services
+      AIRFLOW__API__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
+      AIRFLOW__SIMPLE_AUTH_MANAGER__JWT_SECRET_KEY: ${AIRFLOW_SECRET_KEY}
+      AIRFLOW__SIMPLE_AUTH_MANAGER__JWT_ALGORITHM: 'HS256'
+      AIRFLOW__SIMPLE_AUTH_MANAGER__JWT_EXPIRATION_DELTA: 86400  # 24 hours in seconds
+      AIRFLOW__SIMPLE_AUTH_MANAGER__JWT_REFRESH_DELTA: 604800   # 7 days in seconds
+      
+      # API Authentication for worker-to-API communication (Airflow 3.x)
+      # This is the correct JWT secret for Task Execution API
+      AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_SECRET_KEY}
       
       # Worker Configuration
       AIRFLOW__CELERY__WORKER_CONCURRENCY: 16
@@ -557,6 +591,8 @@ services:
         condition: service_healthy
     profiles:
       - celery  # Only included when using CeleryExecutor
+
+
 
   # Flower Service (Celery Monitoring)
   flower:

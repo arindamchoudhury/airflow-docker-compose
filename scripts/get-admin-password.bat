@@ -17,14 +17,14 @@ echo.
 
 REM Try to get password from the auto-generated file first
 set GENERATED_FILE=/opt/airflow/simple_auth_manager_passwords.json.generated
-docker-compose exec -T airflow-api-server test -f %GENERATED_FILE% >nul 2>&1
+docker-compose exec -T airflow-api-server-1 test -f %GENERATED_FILE% >nul 2>&1
 if %errorlevel% equ 0 (
     echo Reading from auto-generated password file...
-    for /f "tokens=*" %%i in ('docker-compose exec -T airflow-api-server python -c "import json; data=json.load(open('%GENERATED_FILE%')); print(data.get('admin', 'Not found'))" 2^>nul') do set ADMIN_PASSWORD=%%i
+    for /f "tokens=*" %%i in ('docker-compose exec -T airflow-api-server-1 python -c "import json; data=json.load(open('%GENERATED_FILE%')); print(data.get('admin', 'Not found'))" 2^>nul') do set ADMIN_PASSWORD=%%i
 ) else (
     echo Auto-generated file not found, reading from Simple Auth Manager directly...
     REM Get password using Simple Auth Manager API
-    for /f "tokens=*" %%i in ('docker-compose exec -T airflow-api-server python -c "from airflow.api_fastapi.auth.managers.simple.simple_auth_manager import SimpleAuthManager; auth_manager = SimpleAuthManager(); users = auth_manager.get_users(); passwords = auth_manager.get_passwords(users); print(passwords.get('admin', 'Not found'))" 2^>nul') do set ADMIN_PASSWORD=%%i
+    for /f "tokens=*" %%i in ('docker-compose exec -T airflow-api-server-1 python -c "from airflow.api_fastapi.auth.managers.simple.simple_auth_manager import SimpleAuthManager; auth_manager = SimpleAuthManager(); users = auth_manager.get_users(); passwords = auth_manager.get_passwords(users); print(passwords.get('admin', 'Not found'))" 2^>nul') do set ADMIN_PASSWORD=%%i
 )
 
 REM Check if password was found
