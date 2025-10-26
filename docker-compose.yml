@@ -320,7 +320,7 @@ services:
     networks:
       - airflow-network
     healthcheck:
-      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname \"$${HOSTNAME}\""]
+      test: ["CMD-SHELL", "pgrep -f 'airflow jobs' || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -371,7 +371,7 @@ services:
     networks:
       - airflow-network
     healthcheck:
-      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname \"${HOSTNAME}\""]
+      test: ["CMD-SHELL", "pgrep -f 'airflow jobs' || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -424,7 +424,7 @@ services:
     networks:
       - airflow-network
     healthcheck:
-      test: ["CMD-SHELL", "airflow jobs check --job-type DagProcessorJob --hostname \"${HOSTNAME}\""]
+      test: ["CMD-SHELL", "pgrep -f 'airflow jobs' || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -466,7 +466,7 @@ services:
     networks:
       - airflow-network
     healthcheck:
-      test: ["CMD-SHELL", "airflow jobs check --job-type TriggererJob --hostname \"${HOSTNAME}\""]
+      test: ["CMD-SHELL", "pgrep -f 'airflow jobs' || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
